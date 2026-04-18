@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+data/videos/
+output/*.mp4
+database/*.db
+models/
+*.pt
+
