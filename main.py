@@ -5,8 +5,10 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 import easyocr
+import re
 
 model = YOLO('yolov8n.pt')
+plate_model = YOLO('models/plate_model.pt')
 tracker = DeepSort(max_age=30)
 reader = easyocr.Reader(['en'], gpu=False)
 
@@ -19,7 +21,7 @@ cap = cv2.VideoCapture(VIDEO_PATH)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fps = int(cap.get(cv2.CAP_PROP_FPS))
-LINE_Y = height // 2
+LINE_Y = int(height * 0.6)
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (width, height))
@@ -45,29 +47,70 @@ conn.commit()
 
 def read_plate(frame, x1, y1, x2, y2):
     try:
-        # Plate area neeche wale hisse mein hoti hai gaadi ke
-        plate_y1 = y1 + int((y2 - y1) * 0.6)
-        crop = frame[max(0, plate_y1):y2, max(0, x1):x2]
-        if crop.size == 0:
+        # Vehicle crop karo - thoda extra space niche (plate area)
+        plate_y1 = y1 + int((y2 - y1) * 0.5)  # Plate usually niche hoti hai
+        vehicle_crop = frame[max(0, plate_y1):y2, max(0, x1):x2]
+        if vehicle_crop.size == 0:
             return 'UNREADABLE'
 
-        # Image sharpen karo
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2, fy=2)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Plate model se plate dhundo
+        plate_results = plate_model(vehicle_crop, verbose=False)
 
-        results = reader.readtext(thresh)
-        if results:
-            best = max(results, key=lambda x: x[2])
-            text = best[1].upper().strip()
-            conf = best[2]
-            # Clean text - sirf letters aur numbers rakho
-            text = re.sub(r'[^A-Z0-9\-]', '', text)
-            if conf > 0.25 and len(text) >= 3:
-                return text
-        return 'UNREADABLE'
-    except:
+        plate_text = 'UNREADABLE'
+        best_conf = 0
+
+        for pr in plate_results:
+            for pb in pr.boxes:
+                px1, py1, px2, py2 = map(int, pb.xyxy[0])
+                plate_conf = float(pb.conf[0])
+
+                if plate_conf > 0.2:  # Threshold kam kiya
+                    # Plate crop karo - thoda padding add karo
+                    pad = 5
+                    plate_crop = vehicle_crop[
+                        max(0, py1-pad):min(vehicle_crop.shape[0], py2+pad),
+                        max(0, px1-pad):min(vehicle_crop.shape[1], px2+pad)
+                    ]
+                    if plate_crop.size == 0:
+                        continue
+
+                    # Image enhance karo
+                    gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.resize(gray, None, fx=4, fy=4)  # Zyada upscale
+
+                    # Contrast improve karo
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                    gray = clahe.apply(gray)
+
+                    # Noise remove karo
+                    gray = cv2.GaussianBlur(gray, (3,3), 0)
+
+                    # Multiple threshold attempts
+                    _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    _, thresh2 = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+
+                    # Morphology operations - characters ko clear karo
+                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+                    thresh1 = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel, iterations=2)
+                    thresh1 = cv2.morphologyEx(thresh1, cv2.MORPH_OPEN, kernel, iterations=1)
+                    thresh2 = cv2.morphologyEx(thresh2, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+                    # OCR - multiple attempts
+                    for thresh in [thresh1, thresh2]:
+                        results = reader.readtext(thresh, detail=1)
+                        if results:
+                            best = max(results, key=lambda x: x[1])
+                            text = best[1].upper().strip()
+                            conf = best[0] if isinstance(best, tuple) else best[2]
+                            # Pakistan/India format: XX-XX-XX ya XXXXXX
+                            text = re.sub(r'[^A-Z0-9]', '', text)
+                            if len(text) >= 4 and conf > best_conf:
+                                plate_text = text
+                                best_conf = conf
+
+        return plate_text
+    except Exception as e:
+        print(f"Plate read error: {e}")
         return 'UNREADABLE'
 
 print("Real OCR processing shuru...")
@@ -78,8 +121,6 @@ while cap.isOpened():
         break
 
     frame_count += 1
-    if frame_count % 2 != 0:
-        continue
 
     # Info panel
     overlay = frame.copy()
@@ -115,7 +156,7 @@ while cap.isOpened():
             cls_id = int(box.cls[0])
             if cls_id in VEHICLE_CLASSES:
                 conf = float(box.conf[0])
-                if conf > 0.4:
+                if conf > 0.3:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     detections.append(([x1, y1, x2-x1, y2-y1], conf, VEHICLE_CLASSES[cls_id]))
 

@@ -20,10 +20,22 @@ DB_PATH = r'C:\Users\LENOVO\Desktop\smart_city_traffic\smart-traffic-anpr\databa
 def load_data():
     try:
         conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vehicle_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vehicle_id INTEGER,
+                vehicle_type TEXT,
+                plate_number TEXT,
+                timestamp TEXT
+            )
+        ''')
+        conn.commit()
         df = pd.read_sql_query("SELECT * FROM vehicle_logs", conn)
         conn.close()
         return df
     except Exception as e:
+        st.error(f"Database error: {e}")
         return pd.DataFrame()
 
 def process_video(video_path, output_path):
@@ -37,7 +49,7 @@ def process_video(video_path, output_path):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = int(cap.get(cv2.CAP_PROP_FPS))
-    LINE_Y = height // 2
+    LINE_Y = int(height * 0.75)
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -63,7 +75,7 @@ def process_video(video_path, output_path):
 
     def read_plate(frame, x1, y1, x2, y2):
         try:
-            plate_y1 = y1 + int((y2 - y1) * 0.6)
+            plate_y1 = y1 + int((y2 - y1) * 0.4)
             crop = frame[max(0, plate_y1):y2, max(0, x1):x2]
             if crop.size == 0:
                 return 'UNREADABLE'
@@ -77,7 +89,7 @@ def process_video(video_path, output_path):
                 text = best[1].upper().strip()
                 conf = best[2]
                 text = re.sub(r'[^A-Z0-9\-]', '', text)
-                if conf > 0.25 and len(text) >= 3:
+                if conf > 0.15 and len(text) >= 2:
                     return text
             return 'UNREADABLE'
         except:
@@ -249,6 +261,15 @@ with tab2:
 
             st.subheader("Output Video")
             st.video(out_path)
+
+            with open(out_path, 'rb') as video_file:
+                video_bytes = video_file.read()
+            st.download_button(
+                label="⬇️ Download Processed Video",
+                data=video_bytes,
+                file_name="detection_output.mp4",
+                mime="video/mp4"
+            )
 
             st.subheader("Updated Results")
             df_new = load_data()
